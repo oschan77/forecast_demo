@@ -8,6 +8,7 @@ from darts.ad import *
 from darts.metrics import *
 from darts.models import *
 from darts.models import GlobalNaiveAggregate, GlobalNaiveDrift, GlobalNaiveSeasonal
+from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 
 
 def forecast_and_plot(model, series_train, series_val, n_jobs=True, plot=False):
@@ -19,9 +20,6 @@ def forecast_and_plot(model, series_train, series_val, n_jobs=True, plot=False):
     mape_loss = mape(series_val, pred)
     mae_loss = mae(series_val, pred)
 
-    # print(f"model {model} obtains MAPE: {mape_loss}")
-    # print(f"model {model} obtains MAE: {mae_loss}")
-
     if plot:
         fig, ax = plt.subplots(figsize=(30, 5))
         series_train.plot(label="train")
@@ -29,23 +27,6 @@ def forecast_and_plot(model, series_train, series_val, n_jobs=True, plot=False):
         pred.plot(label="prediction")
 
     return mape_loss, mae_loss
-
-
-def process_file(file_path):
-    df = pd.read_csv(file_path)
-    df["Date"] = pd.to_datetime(df["Date"])
-    df.set_index("Date", inplace=True)
-    df = df.resample("W").ffill()
-    file_name = os.path.basename(file_path)
-    base_name = os.path.splitext(file_name)[0]
-    df.to_csv(f"data/processed/walmart_sales/bySD_fillDates/{base_name}.csv")
-
-
-def process_files_in_directory(directory):
-    for root, dirs, files in os.walk(directory):
-        for file in files:
-            file_path = os.path.join(root, file)
-            process_file(file_path)
 
 
 def load_all_timeseries(dir_path):
@@ -62,7 +43,7 @@ def load_all_timeseries(dir_path):
                 value_cols="Weekly_Sales",
                 freq="W-FRI",
             )
-            train_ts, val_ts = ts.split_before(0.80)
+            train_ts, val_ts = ts.split_before(0.70)
 
             all_files.append(file)
             all_series.append(ts)
@@ -85,9 +66,6 @@ def eval_on_all_series(model, train_series, val_series, n_jobs=True):
         mape_losses.append(mape_loss)
         mae_losses.append(mae_loss)
 
-    print(f"mean MAPE: {np.mean(mape_losses)}")
-    print(f"mean MAE: {np.mean(mae_losses)}")
-
     return mape_losses, mae_losses
 
 
@@ -99,15 +77,32 @@ def print_losses(model_name, mape_losses, mae_losses):
 
 if __name__ == "__main__":
     all_files, all_series, train_series, val_series = load_all_timeseries(
-        "data/processed/walmart_sales/BySD"
+        "data/processed/walmart_sales/BySD500"
+    )
+
+    early_stopping = EarlyStopping(
+        monitor="train_loss",
+        patience=20,
+        min_delta=1e2,
+        mode="min",
     )
 
     nhits_model = NHiTSModel(
         input_chunk_length=64,
         output_chunk_length=12,
-        pl_trainer_kwargs={"accelerator": "gpu", "devices": -1, "strategy": "ddp"},
+        num_stacks=5,
+        num_blocks=2,
+        num_layers=3,
+        dropout=0.2,
+        pl_trainer_kwargs={
+            "accelerator": "gpu",
+            "devices": -1,
+            "strategy": "ddp",
+            "callbacks": [early_stopping],
+        },
     )
-    nhits_model.fit(train_series, epochs=30, verbose=True)
+
+    nhits_model.fit(train_series, epochs=500, verbose=True)
 
     nhits_mape_losses, nhits_mae_losses = eval_on_all_series(
         nhits_model, train_series, val_series
@@ -120,17 +115,17 @@ if __name__ == "__main__":
         output_chunk_length=12,
     )
 
-    # linear_regression_model.fit(train_series)
+    linear_regression_model.fit(train_series)
 
-    # linear_regression_mape_losses, linear_regression_mae_losses = eval_on_all_series(
-    #     linear_regression_model,
-    #     train_series,
-    #     val_series,
-    #     n_jobs=False,
-    # )
+    linear_regression_mape_losses, linear_regression_mae_losses = eval_on_all_series(
+        linear_regression_model,
+        train_series,
+        val_series,
+        n_jobs=False,
+    )
 
-    # print_losses(
-    #     "linear_regression_model",
-    #     linear_regression_mape_losses,
-    #     linear_regression_mae_losses,
-    # )
+    print_losses(
+        "linear_regression_model",
+        linear_regression_mape_losses,
+        linear_regression_mae_losses,
+    )
